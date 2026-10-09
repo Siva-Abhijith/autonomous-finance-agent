@@ -1,6 +1,7 @@
 import json
 import psycopg
 from ollama import chat
+import uuid
 
 
 # DATABASE
@@ -11,6 +12,56 @@ def get_connection():
         host="localhost",
         port=5432
     )
+
+def save_execution_log(run_id, step, tool_name, arguments, status, result):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO agent_execution_logs
+            (run_id, step, tool_name, arguments, status, result)
+        VALUES (%s, %s, %s, %s, %s, %s);
+    """, (
+        run_id,
+        step,
+        tool_name,
+        json.dumps(arguments),
+        status,
+        json.dumps(result)
+    ))
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+
+def start_agent_run(run_id, user_request):
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO agent_runs (run_id, user_request)
+                VALUES (%s, %s);
+            """, (run_id, user_request))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def finish_agent_run(run_id, final_status, final_response):
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                UPDATE agent_runs
+                SET final_status = %s,
+                    final_response = %s,
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s;
+            """, (final_status, final_response, run_id))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def find_latest_invoice(vendor):
@@ -106,34 +157,78 @@ def record_invoice(invoice_number):
     }
 
 
+
 def verify_invoice(invoice_number):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT invoice_number, vendor, amount, due_date
-        FROM processed_invoices
-        WHERE invoice_number = %s;
-    """, (invoice_number,))
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    s.invoice_number,
+                    s.vendor,
+                    s.amount,
+                    s.due_date,
+                    p.invoice_number,
+                    p.vendor,
+                    p.amount,
+                    p.due_date
+                FROM invoices AS s
+                LEFT JOIN processed_invoices AS p
+                    ON p.invoice_number = s.invoice_number
+                WHERE s.invoice_number = %s;
+            """, (invoice_number,))
 
-    result = cursor.fetchone()
+            result = cursor.fetchone()
 
-    cursor.close()
-    connection.close()
+        if result is None:
+            return {
+                "verified": False,
+                "invoice_number": invoice_number,
+                "error": "Invoice does not exist in the source system."
+            }
 
-    if result is None:
+        source_number, source_vendor, source_amount, source_date = result[:4]
+        processed_number, processed_vendor, processed_amount, processed_date = result[4:]
+
+        if processed_number is None:
+            return {
+                "verified": False,
+                "invoice_number": invoice_number,
+                "error": "Invoice is missing from the processed system."
+            }
+
+        mismatches = []
+
+        if source_vendor != processed_vendor:
+            mismatches.append("vendor")
+
+        if source_amount != processed_amount:
+            mismatches.append("amount")
+
+        if source_date != processed_date:
+            mismatches.append("due_date")
+
+        if mismatches:
+            return {
+                "verified": False,
+                "invoice_number": invoice_number,
+                "error": "Invoice fields do not match the source record.",
+                "mismatches": mismatches
+            }
+
         return {
-            "verified": False,
-            "invoice_number": invoice_number
+            "verified": True,
+            "invoice_number": source_number,
+            "vendor": source_vendor,
+            "amount": str(source_amount),
+            "due_date": str(source_date),
+            "comparison": "All fields match the source record."
         }
 
-    return {
-        "verified": True,
-        "invoice_number": result[0],
-        "vendor": result[1],
-        "amount": float(result[2]),
-        "due_date": str(result[3])
-    }
+    finally:
+        connection.close()
+
 
 
 # TOOL REGISTRY
@@ -277,29 +372,37 @@ def run_agent(user_request):
         "recorded_invoices": set()
     }
 
+    run_id = str(uuid.uuid4())
+    print(f"\nRun ID: {run_id}")
+
+    start_agent_run(run_id, user_request)
+
+
+    execution_log = []
+
     messages = [
         {
             "role": "system",
             "content": """
-You are an autonomous finance operations worker.
+            You are an autonomous finance operations worker.
 
-Your job is to complete the user's requested task using the
-available tools.
+            Your job is to complete the user's requested task using the
+            available tools.
 
-Rules:
+            Rules:
 
-1. Do not invent invoice data.
-2. Treat tool results as authoritative.
-3. Use the output of one tool to decide the next action.
-4. If the user asks you to record an invoice, use the invoice
-   number returned by the invoice search tool.
-5. After recording an invoice, verify that the operation succeeded
-   before claiming success.
-6. If a tool returns an error, do not pretend the task succeeded.
-   Try to recover when possible.
-7. When the task is complete, give the user a concise summary
-   of what happened and include relevant evidence.
-"""
+            1. Do not invent invoice data.
+            2. Treat tool results as authoritative.
+            3. Use the output of one tool to decide the next action.
+            4. If the user asks you to record an invoice, use the invoice
+            number returned by the invoice search tool.
+            5. After recording an invoice, verify that the operation succeeded
+            before claiming success.
+            6. If a tool returns an error, do not pretend the task succeeded.
+            Try to recover when possible.
+            7. When the task is complete, give the user a concise summary
+            of what happened and include relevant evidence.
+            """
         },
 
         {
@@ -323,12 +426,61 @@ Rules:
         # No tool call = agent is finished
         # ----------------------------------------------------
 
+       
         if not response.message.tool_calls:
+            
+            verified_invoice = next(
+                (
+                    entry["result"]
+                    for entry in reversed(execution_log)
+                    if entry["tool"] == "verify_invoice"
+                    and entry["result"].get("verified") is True
+                ),
+                None
+            )
+
+            if verified_invoice:
+                final_response = (
+                    "Invoice verified successfully.\n\n"
+                    f"Invoice number: {verified_invoice['invoice_number']}\n"
+                    f"Vendor: {verified_invoice['vendor']}\n"
+                    f"Amount: {verified_invoice['amount']} "
+                    "(currency not specified in the database)\n"
+                    f"Due date: {verified_invoice['due_date']}\n\n"
+                    "Verification: all checked fields match the source record."
+                )
+            else:
+                final_response = response.message.content
+
+
+            
+            failed_statuses = {
+                "BLOCKED_OR_ERROR",
+                "FAILED",
+                "NOT_VERIFIED",
+                "NOT_FOUND",
+            }
+
+            if any(entry["status"] in failed_statuses for entry in execution_log):
+                final_status = "FAILED"
+            else:
+                final_status = "COMPLETED"
+
+            finish_agent_run(   
+                run_id,
+                final_status,
+                final_response
+            )
 
             print("\n================ FINAL ANSWER ================\n")
-            print(response.message.content)
+            print(final_response)
+            print("\nFinal task status:", final_status)
 
-            return response.message.content
+            print("\n================ EXECUTION LOG ================\n")
+            print(json.dumps(execution_log, indent=2))
+
+            return final_response
+
 
         # ----------------------------------------------------
         # Execute requested tools
@@ -345,7 +497,41 @@ Rules:
 
             result = execute_tool(tool_name, arguments, state)
 
+            # Classify the outcome of this tool call.
+            if result.get("error"):
+                status = "BLOCKED_OR_ERROR"
+            elif result.get("found") is False:
+                status = "NOT_FOUND"
+            elif result.get("success") is False:
+                status = "FAILED"
+            elif result.get("verified") is False:
+                status = "NOT_VERIFIED"
+            elif result.get("already_existed") is True:
+                status = "ALREADY_EXISTS"
+            elif result.get("verified") is True:
+                status = "VERIFIED"
+            else:
+                status = "SUCCESS"
+
+            # Store a record of the action.
+            execution_log.append({
+                "step": len(execution_log) + 1,
+                "tool": tool_name,
+                "arguments": arguments,
+                "status": status,
+                "result": result
+            })
+            save_execution_log(
+                run_id=run_id,
+                step=len(execution_log),
+                tool_name=tool_name,
+                arguments=arguments,
+                status=status,
+                result=result
+            )
+
             print("Tool result:", result)
+            print("Step status:", status)
 
             # Give the result back to the AI.
             messages.append({
