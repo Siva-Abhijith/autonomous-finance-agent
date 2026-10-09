@@ -216,25 +216,66 @@ tools = [
 
 
 # TOOL EXECUTOR
-def execute_tool(tool_name, arguments):
+def execute_tool(tool_name, arguments, state):
 
     if tool_name not in TOOLS:
-        return {
-            "error": f"Unknown tool: {tool_name}"
-        }
+        return {"error": f"Unknown tool: {tool_name}"}
+
+    # Block recording invoices not discovered in this run.
+    if tool_name == "record_invoice":
+        invoice_number = arguments.get("invoice_number")
+
+        if invoice_number not in state["discovered_invoices"]:
+            return {
+                "success": False,
+                "invoice_number": invoice_number,
+                "error": "Recording blocked: this invoice was not discovered during the current agent run."
+            }
+
+    # Block verification unless recording succeeded.
+    if tool_name == "verify_invoice":
+        invoice_number = arguments.get("invoice_number")
+
+        if invoice_number not in state["recorded_invoices"]:
+            return {
+                "verified": False,
+                "invoice_number": invoice_number,
+                "error": "Verification blocked: this agent run has not successfully recorded this invoice."
+            }
 
     try:
         function = TOOLS[tool_name]
-        return function(**arguments)
+        result = function(**arguments)
+
+        # Track invoices found by the search tool.
+        if (
+            tool_name == "find_latest_invoice"
+            and result.get("found") is True
+        ):
+            state["discovered_invoices"].add(
+                result["invoice_number"]
+            )
+
+        # Track successful recordings.
+        if (
+            tool_name == "record_invoice"
+            and result.get("success") is True
+        ):
+            state["recorded_invoices"].add(
+                result["invoice_number"]
+            )
+
+        return result
 
     except Exception as error:
-        return {
-            "error": str(error)
-        }
-
+        return {"error": str(error)}
 
 # AGENT
 def run_agent(user_request):
+    state = {
+        "discovered_invoices": set(),
+        "recorded_invoices": set()
+    }
 
     messages = [
         {
@@ -302,10 +343,7 @@ Rules:
             print("AI requested tool:", tool_name)
             print("Arguments:", arguments)
 
-            result = execute_tool(
-                tool_name,
-                arguments
-            )
+            result = execute_tool(tool_name, arguments, state)
 
             print("Tool result:", result)
 
