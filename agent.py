@@ -413,11 +413,21 @@ def run_agent(user_request):
 
     while True:
 
-        response = chat(
-            model="qwen3:8b",
-            messages=messages,
-            tools=tools
-        )
+        try:
+            response = chat(
+                model="qwen3:8b",
+                messages=messages,
+                tools=tools
+            )
+        except Exception as error:
+            final_response = f"Agent execution failed: {error}"
+            print(final_response)
+            try:
+                finish_agent_run(run_id, "FAILED", final_response)
+            except Exception as status_error:
+                print(f"Could not update run status: {status_error}")
+            print("Final task status: FAILED")
+            return final_response
 
         # Add the assistant's response to the conversation.
         messages.append(response.message)
@@ -454,18 +464,17 @@ def run_agent(user_request):
 
 
             
-            failed_statuses = {
-                "BLOCKED_OR_ERROR",
-                "FAILED",
-                "NOT_VERIFIED",
-                "NOT_FOUND",
-            }
+            verified_successfully = any(
+                entry["tool"] == "verify_invoice"
+                and entry["result"].get("verified") is True
+                for entry in execution_log
+            )
 
-            if any(entry["status"] in failed_statuses for entry in execution_log):
-                final_status = "FAILED"
-            else:
-                final_status = "COMPLETED"
-
+            final_status = (
+                "COMPLETED"
+                if verified_successfully
+                else "FAILED"
+            )
             finish_agent_run(   
                 run_id,
                 final_status,
