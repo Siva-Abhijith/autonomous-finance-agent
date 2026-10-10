@@ -530,14 +530,28 @@ def run_agent(user_request):
                 "status": status,
                 "result": result
             })
-            save_execution_log(
-                run_id=run_id,
-                step=len(execution_log),
-                tool_name=tool_name,
-                arguments=arguments,
-                status=status,
-                result=result
-            )
+            try:
+                save_execution_log(
+                    run_id=run_id,
+                    step=len(execution_log),
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    status=status,
+                    result=result
+                )
+            except Exception as error:
+                final_response = (
+                    f"Execution logging failed at step {len(execution_log)}: {error}"
+                )
+                print(final_response)
+
+                try:
+                    finish_agent_run(run_id, "FAILED", final_response)
+                except Exception as status_error:
+                    print(f"Could not update run status: {status_error}")
+
+                print("Final task status: FAILED")
+                return final_response
 
             print("Tool result:", result)
             print("Step status:", status)
