@@ -2,16 +2,21 @@ import json
 import psycopg
 from ollama import chat
 import uuid
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 # DATABASE
+
 def get_connection():
     return psycopg.connect(
-        dbname="centralign",
-        user="postgres",
-        host="localhost",
-        port=5432
+        dbname=os.getenv("DB_NAME", "centralign"),
+        user=os.getenv("DB_USER", "postgres"),
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
     )
+
 
 
 def save_execution_log(run_id, step, tool_name, arguments, status, result):
