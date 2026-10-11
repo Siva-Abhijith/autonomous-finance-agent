@@ -1,9 +1,7 @@
 
 import unittest
 from unittest.mock import Mock, patch
-
-from agent import execute_tool
-
+from agent import execute_tool, verify_invoice
 
 class TestExecuteTool(unittest.TestCase):
 
@@ -90,6 +88,39 @@ class TestExecuteTool(unittest.TestCase):
 
         self.assertFalse(verify_result["verified"])
         self.assertIn("not successfully recorded", verify_result["error"])
+
+    @patch("agent.get_connection")
+    def test_verification_succeeds_when_all_fields_match(self, mock_connection):
+        mock_cursor = mock_connection.return_value.cursor.return_value.__enter__.return_value
+        mock_cursor.fetchone.return_value = (
+            "INV-1001", "Acme Supplies", 12500.00, "2026-11-15",
+            "INV-1001", "Acme Supplies", 12500.00, "2026-11-15",
+        )
+
+        result = verify_invoice("INV-1001")
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["invoice_number"], "INV-1001")
+        self.assertEqual(result["vendor"], "Acme Supplies")
+        self.assertEqual(result["amount"], "12500.0")
+        self.assertEqual(result["due_date"], "2026-11-15")
+        mock_connection.return_value.close.assert_called_once()
+
+    @patch("agent.get_connection")
+    def test_verification_fails_when_amount_mismatches(self, mock_connection):
+        mock_cursor = mock_connection.return_value.cursor.return_value.__enter__.return_value
+        mock_cursor.fetchone.return_value = (
+            "INV-1001", "Acme Supplies", 12500.00, "2026-11-15",
+            "INV-1001", "Acme Supplies", 12600.00, "2026-11-15",
+        )
+
+        result = verify_invoice("INV-1001")
+
+        self.assertFalse(result["verified"])
+        self.assertIn("amount", result["mismatches"])
+        self.assertNotIn("vendor", result["mismatches"])
+        self.assertNotIn("due_date", result["mismatches"])
+        mock_connection.return_value.close.assert_called_once()
 
 
 if __name__ == "__main__":
