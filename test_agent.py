@@ -1,7 +1,7 @@
 
 import unittest
 from unittest.mock import Mock, patch
-from agent import execute_tool, verify_invoice
+from agent import execute_tool, verify_invoice, record_invoice
 
 class TestExecuteTool(unittest.TestCase):
 
@@ -121,6 +121,44 @@ class TestExecuteTool(unittest.TestCase):
         self.assertNotIn("vendor", result["mismatches"])
         self.assertNotIn("due_date", result["mismatches"])
         mock_connection.return_value.close.assert_called_once()
+
+    @patch("agent.get_connection")
+    def test_recording_nonexistent_source_invoice_fails(self, mock_connection):
+        mock_conn = mock_connection.return_value
+        mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+        mock_cursor.fetchone.return_value = None
+
+        result = record_invoice("INV-MISSING")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["invoice_number"], "INV-MISSING")
+        self.assertIn("does not exist", result["error"])
+        mock_cursor.execute.assert_called_once()
+        mock_conn.commit.assert_not_called()
+        mock_conn.close.assert_called_once()
+
+    @patch("agent.get_connection")
+    def test_duplicate_invoice_is_not_inserted_again(self, mock_connection):
+        mock_conn = mock_connection.return_value
+        mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+
+        mock_cursor.fetchone.return_value = (
+            "INV-1001",
+            "Acme Supplies",
+            12500.00,
+            "2026-11-15",
+        )
+        mock_cursor.rowcount = 0
+
+        result = record_invoice("INV-1001")
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["inserted"])
+        self.assertTrue(result["already_existed"])
+        self.assertEqual(result["invoice_number"], "INV-1001")
+        self.assertEqual(mock_cursor.execute.call_count, 2)
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()
 
 
 if __name__ == "__main__":
