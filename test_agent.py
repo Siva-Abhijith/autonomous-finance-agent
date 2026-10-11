@@ -254,7 +254,34 @@ class TestExecuteTool(unittest.TestCase):
         run_agent("Find, record, and verify invoice INV-1001")
 
         self.assertEqual(mock_finish.call_args.args[1], "FAILED")
+    @patch("agent.chat")
+    @patch("agent.finish_agent_run")
+    @patch("agent.start_agent_run")
+    def test_ollama_failure_marks_run_failed(
+        self, mock_start, mock_finish, mock_chat
+    ):
+        mock_chat.side_effect = ConnectionError("Ollama is unavailable")
 
+        run_agent("Find the latest invoice from Acme Supplies")
+
+        self.assertEqual(mock_chat.call_count, 3)
+        self.assertEqual(mock_finish.call_args.args[1], "FAILED")
+    @patch("agent.chat")
+    @patch("agent.save_execution_log")
+    @patch("agent.finish_agent_run")
+    @patch("agent.start_agent_run")
+    def test_turn_limit_marks_run_failed(
+        self, mock_start, mock_finish, mock_log, mock_chat
+    ):
+        mock_chat.return_value = self.model_response(
+            "find_latest_invoice",
+            {"vendor": "Acme Supplies"},
+        )
+
+        run_agent("Find the latest invoice from Acme Supplies")
+
+        self.assertEqual(mock_chat.call_count, 10)
+        self.assertEqual(mock_finish.call_args.args[1], "FAILED")
 
 if __name__ == "__main__":
     unittest.main()
