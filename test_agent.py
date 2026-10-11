@@ -1,7 +1,8 @@
 
 import unittest
 from unittest.mock import Mock, patch
-from agent import execute_tool, verify_invoice, record_invoice
+from types import SimpleNamespace
+from agent import execute_tool, verify_invoice, record_invoice, run_agent
 
 class TestExecuteTool(unittest.TestCase):
 
@@ -159,6 +160,100 @@ class TestExecuteTool(unittest.TestCase):
         self.assertEqual(mock_cursor.execute.call_count, 2)
         mock_conn.commit.assert_called_once()
         mock_conn.close.assert_called_once()
+
+    def model_response(self, tool_name=None, arguments=None, content=""):
+        tool_calls = []
+
+        if tool_name:
+            tool_calls.append(
+                SimpleNamespace(
+                    function=SimpleNamespace(
+                        name=tool_name,
+                        arguments=arguments,
+                    )
+                )
+            )
+
+        return SimpleNamespace(
+            message=SimpleNamespace(
+                content=content,
+                tool_calls=tool_calls,
+            )
+        )
+
+    @patch("agent.chat")
+    @patch("agent.save_execution_log")
+    @patch("agent.finish_agent_run")
+    @patch("agent.start_agent_run")
+    @patch("agent.execute_tool")
+    def test_failed_recording_makes_agent_run_fail(
+        self,
+        mock_execute,
+        mock_start,
+        mock_finish,
+        mock_log,
+        mock_chat,
+    ):
+        mock_execute.return_value = {
+            "success": False,
+            "invoice_number": "INV-1001",
+            "error": "Database write failed",
+        }
+
+        mock_chat.side_effect = [
+            self.model_response(
+                "record_invoice",
+                {"invoice_number": "INV-1001"},
+            ),
+            self.model_response(content="Finished."),
+        ]
+
+        run_agent("Find and record invoice INV-1001")
+
+        self.assertEqual(mock_finish.call_args.args[1], "FAILED")
+
+    @patch("agent.chat")
+    @patch("agent.save_execution_log")
+    @patch("agent.finish_agent_run")
+    @patch("agent.start_agent_run")
+    @patch("agent.execute_tool")
+    def test_failed_verification_makes_agent_run_fail(
+        self,
+        mock_execute,
+        mock_start,
+        mock_finish,
+        mock_log,
+        mock_chat,
+    ):
+        mock_execute.side_effect = [
+            {
+                "success": True,
+                "invoice_number": "INV-1001",
+                "inserted": True,
+            },
+            {
+                "verified": False,
+                "invoice_number": "INV-1001",
+                "mismatches": ["amount"],
+                "error": "Invoice fields do not match the source record.",
+            },
+        ]
+
+        mock_chat.side_effect = [
+            self.model_response(
+                "record_invoice",
+                {"invoice_number": "INV-1001"},
+            ),
+            self.model_response(
+                "verify_invoice",
+                {"invoice_number": "INV-1001"},
+            ),
+            self.model_response(content="Finished."),
+        ]
+
+        run_agent("Find, record, and verify invoice INV-1001")
+
+        self.assertEqual(mock_finish.call_args.args[1], "FAILED")
 
 
 if __name__ == "__main__":
