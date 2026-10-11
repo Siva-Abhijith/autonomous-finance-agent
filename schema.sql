@@ -1,0 +1,37 @@
+CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    invoice_number TEXT UNIQUE NOT NULL,
+    vendor TEXT NOT NULL,
+    amount NUMERIC(12, 2) NOT NULL,
+    due_date DATE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS processed_invoices (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    invoice_number TEXT UNIQUE NOT NULL,
+    vendor TEXT NOT NULL,
+    amount NUMERIC(12, 2) NOT NULL,
+    due_date DATE NOT NULL,
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    user_request TEXT NOT NULL,
+    final_status TEXT NOT NULL DEFAULT 'RUNNING',
+    final_response TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS agent_execution_logs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step INTEGER NOT NULL,
+    tool_name TEXT NOT NULL,
+    arguments JSONB NOT NULL,
+    status TEXT NOT NULL,
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, step)
+);
