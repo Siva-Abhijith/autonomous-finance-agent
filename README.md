@@ -1,86 +1,60 @@
+# Autonomous Finance Agent
 
-# Autonomous Finance Operations Agent
+An AI-powered finance operations prototype built with Python, Ollama, and PostgreSQL. The agent interprets natural-language tasks, selects appropriate tools, performs controlled database operations, and verifies invoice records against authoritative source data.
 
-A Python-based AI finance worker that uses a local language model, PostgreSQL, and controlled tools to find, record, and verify invoices.
-
-The project explores how an AI agent can execute real operations while maintaining an auditable history and refusing to claim success when verification fails.
+The project explores reliable AI agent execution through tool calling, database constraints, verification, and persistent execution logs.
 
 ## Features
 
-- Local LLM inference using Ollama and Qwen3 8B.
-- PostgreSQL-backed invoice search and recording.
-- Tool calling through a registered set of Python functions.
-- Execution guards that restrict recording to invoices discovered during the current run.
-- Verification against authoritative source records.
-- Duplicate prevention through database uniqueness and `ON CONFLICT DO NOTHING`.
-- Per-tool execution logs stored in PostgreSQL.
-- Agent run records containing status, final response, and timestamps.
-- Up to three attempts for failed Ollama calls.
-- A maximum of ten agent turns per run.
-- Error handling for tool execution, logging, and unexpected failures.
+- **Local LLM:** Uses Ollama with Qwen3 8B for task interpretation and tool selection.
+- **PostgreSQL integration:** Stores source invoices, processed records, and execution history.
+- **Controlled tool calling:** Executes model-selected actions through registered Python functions.
+- **Execution safeguards:** Enforces invoice discovery and explicit invoice targets.
+- **Duplicate prevention:** Uses database uniqueness constraints and conflict handling.
+- **Invoice verification:** Compares processed records against authoritative source data.
+- **Execution logging:** Tracks tool arguments, results, and agent run statuses.
+- **Failure handling:** Handles database errors, verification mismatches, model failures, and execution limits.
+- **Automated testing:** Includes 16 unit tests for core functionality and safety checks.
 
 ## Architecture
 
-1. The user submits a task.
-2. The agent sends the request and available tool definitions to Ollama.
-3. The model chooses a tool and supplies its arguments.
-4. Python validates the tool request against execution guards.
-5. The tool interacts with PostgreSQL and returns a structured result.
-6. The agent records the tool result in the execution log and returns it to the model.
-7. For invoice-processing tasks, the agent verifies the processed invoice against the source record.
-8. The agent stores the final response and run status in PostgreSQL.
+1. The user submits a natural-language finance task.
+2. Ollama selects a tool and provides its arguments.
+3. Python validates the request against execution rules.
+4. The selected tool performs the database operation.
+5. The result is logged and returned to the model.
+6. The agent verifies the invoice and reports the final task status.
 
-The LLM chooses actions, but Python tools and PostgreSQL perform the actual database operations. Invoice amounts, vendors, and due dates are retrieved from the source database rather than invented by the model.
+The LLM proposes actions, while Python executes them and PostgreSQL stores the data. Successful completion depends on actual tool results and verification, not merely the model's claims.
 
 ## Technology Stack
 
 - Python
-- Ollama
-- Qwen3 8B
-- PostgreSQL
-- psycopg
+- Ollama and Qwen3 8B
+- PostgreSQL and psycopg
+- python-dotenv
+- unittest
 - Git
-
-## Requirements
-
-- Python 3
-- PostgreSQL
-- Ollama
-- The Qwen3 8B model
 
 ## Setup
 
-### 1. Clone the repository
-
-```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
-cd <YOUR_REPOSITORY_DIRECTORY>
-```
-
-Replace the placeholders with your actual repository URL and directory.
-
-### 2. Create a virtual environment
+### 1. Install dependencies
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 4. Start PostgreSQL
+### 2. Initialize PostgreSQL
 
-On systems using systemd:
+Start PostgreSQL:
 
 ```bash
 sudo systemctl start postgresql
 ```
 
-For a **fresh installation**, create the database and initialize its tables:
+For a fresh database, initialize the schema and sample data:
 
 ```bash
 sudo -u postgres createdb centralign
@@ -88,107 +62,58 @@ sudo -u postgres psql -d centralign -f schema.sql
 sudo -u postgres psql -d centralign -f seed.sql
 ```
 
-The seed script inserts four demonstration invoices. It does not populate the full development dataset.
+Configure database access using `.env.example` and your local PostgreSQL credentials. Only create and seed a new database when appropriate.
 
-**Important:** Run the `createdb` command only when creating a new database. Do not run the seed script against your existing development database unless you intentionally want to add the demonstration invoices.
-
-The project expects four tables:
-
-- `invoices` — authoritative source invoices.
-- `processed_invoices` — invoices recorded by the agent.
-- `agent_runs` — overall status and response for each agent run.
-- `agent_execution_logs` — arguments, results, and status for each tool execution.
-
-The `schema.sql` script creates missing tables but does not migrate existing tables whose definitions differ.
-
-### 5. Configure PostgreSQL access
-
-The current `get_connection()` function in `agent.py` connects using:
-
-- Database: `centralign`
-- User: `postgres`
-- Host: `localhost`
-- Port: `5432`
-
-Configure PostgreSQL authentication so the Python process can connect with these settings, or update `get_connection()` to match your local environment.
-
-Do not commit database passwords, API keys, or other secrets.
-
-### 6. Start Ollama
-
-Ensure Ollama is running and the model is available:
+### 3. Start Ollama
 
 ```bash
 ollama pull qwen3:8b
 ollama serve
 ```
 
-If Ollama is already running as a service, you do not need to start a second server.
+If Ollama is already running, do not start another instance.
 
-### 7. Run the agent
-
-In another terminal, activate the virtual environment and run:
+### 4. Run the agent
 
 ```bash
 python agent.py
 ```
 
-Enter a task such as:
+Example request:
 
 ```text
-Find the latest invoice from Acme Supplies, record it, and verify it.
+Record invoice AC-1043 and verify it against the source record.
 ```
-
-## Example Workflow
-
-For an invoice-processing request, the expected tool sequence is:
-
-1. `find_latest_invoice`
-2. `record_invoice`
-3. `verify_invoice`
-
-A successful verification compares the vendor, amount, and due date against the source record.
-
-If the invoice already exists in the processed table, the agent avoids inserting a duplicate. If verification detects a mismatch, the run is marked `FAILED`.
-
-In this prototype, "latest" means the invoice with the greatest due date because the source schema does not include an invoice creation date.
 
 ## Testing
 
-The following scenarios have been exercised manually during development:
+Run the automated test suite:
 
-- Find, record, and verify an invoice.
-- Handle an invoice that was already processed.
-- Report a nonexistent vendor without inventing an invoice.
-- Detect a deliberately altered processed invoice amount.
-- Retry failed Ollama calls.
-- Persist run records and individual tool execution results.
-- Report failures when the model is unavailable or execution logging fails.
+```bash
+python -m unittest -v test_agent.py
+```
 
-`test_ollama.py` is a basic connectivity test for the local model.
+The 16 tests cover tool execution, invoice discovery, execution guards, duplicate handling, verification success and failure, model errors, and execution limits.
 
-These are manual development tests, not a comprehensive automated test suite.
+The live workflow has also been tested against PostgreSQL and Ollama. Invoice `AC-1043` was recognized as already recorded, was not inserted again, and was successfully verified against its source record.
 
 ## Limitations
 
-- The tool set focuses on invoice search, recording, and verification rather than general finance operations.
-- The agent depends on a running local Ollama model and PostgreSQL.
-- Task completion logic is tailored to the current invoice workflow.
-- Natural-language intent classification and completion criteria need stronger structured planning.
-- Database connection settings are currently defined in Python.
-- Automated regression tests, formal evaluation metrics, and production deployment controls remain future work.
-- The prototype is not designed for production financial use.
+- Focused on invoice processing rather than general finance operations.
+- Requires PostgreSQL and a running local Ollama model.
+- Automatic reconciliation of mismatched invoice fields is not implemented.
+- Additional integration testing, security controls, and production-readiness work are needed.
 
-## Future Work
+## Future Improvements
 
-- Move database settings to environment variables.
-- Add automated tests for tools, guards, retries, and verification.
+- Add controlled invoice reconciliation with audit logging.
 - Improve task planning and completion criteria.
-- Add structured error categories and recovery policies.
-- Introduce human approval for sensitive finance operations.
-- Evaluate reliability across a larger set of representative tasks.
-- Improve database initialization and sample-data management.
+- Expand integration testing and reliability evaluation.
+- Introduce human approval for sensitive financial operations.
+- Strengthen database migrations, access controls, and monitoring.
 
 ## Project Status
 
-**Functional prototype.** The project demonstrates local LLM tool calling, guarded database operations, verification, and persistent execution records.
+**Functional engineering prototype.**
+
+Demonstrates local LLM tool calling, guarded database operations, invoice verification, duplicate prevention, and persistent execution logging. Not intended for production financial use in its current form.

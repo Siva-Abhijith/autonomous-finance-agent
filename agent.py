@@ -4,6 +4,7 @@ from ollama import chat
 import uuid
 import os
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -325,23 +326,41 @@ tools = [
 
 
 # TOOL EXECUTOR
-def execute_tool(tool_name, arguments, state):
 
+def execute_tool(tool_name, arguments, state):
     if tool_name not in TOOLS:
         return {"error": f"Unknown tool: {tool_name}"}
 
-    # Block recording invoices not discovered in this run.
+    # Block recording the wrong invoice when the user specifies a target.
     if tool_name == "record_invoice":
         invoice_number = arguments.get("invoice_number")
+        explicit_target = state.get("explicit_invoice_number")
 
-        if invoice_number not in state["discovered_invoices"]:
+        if explicit_target and invoice_number != explicit_target:
             return {
                 "success": False,
                 "invoice_number": invoice_number,
-                "error": "Recording blocked: this invoice was not discovered during the current agent run."
+                "error": (
+                    f"Recording blocked: the user explicitly requested "
+                    f"{explicit_target}, not {invoice_number}."
+                ),
             }
 
-    # Block verification unless recording succeeded.
+        # Without an explicit target, require discovery during this run.
+        if (
+            not explicit_target
+            and invoice_number not in state["discovered_invoices"]
+        ):
+            return {
+                "success": False,
+                "invoice_number": invoice_number,
+                "error": (
+                    "Recording blocked: this invoice was not discovered "
+                    "during the current agent run."
+                ),
+            }
+
+    # Block verification unless recording succeeded during this run.
     if tool_name == "verify_invoice":
         invoice_number = arguments.get("invoice_number")
 
@@ -349,7 +368,12 @@ def execute_tool(tool_name, arguments, state):
             return {
                 "verified": False,
                 "invoice_number": invoice_number,
-                "error": "Verification blocked: this agent run has not successfully recorded this invoice."
+                "error": (
+                    "Verification blocked: invoice was not successfully "
+                    "recorded during the current agent run. "
+                    "Call record_invoice for this invoice first, then retry "
+                    "verification."
+                ),
             }
 
     try:
@@ -365,7 +389,7 @@ def execute_tool(tool_name, arguments, state):
                 result["invoice_number"]
             )
 
-        # Track successful recordings.
+        # Track successful recordings, including existing invoices.
         if (
             tool_name == "record_invoice"
             and result.get("success") is True
@@ -377,14 +401,33 @@ def execute_tool(tool_name, arguments, state):
         return result
 
     except Exception as error:
-        return {"error": str(error)}
+        return {
+            "error": str(error),
+            "success": False,
+            "invoice_number": arguments.get("invoice_number"),
+        }
+
+def extract_invoice_number(user_request):
+    """Extract an explicitly specified invoice number from the request."""
+    matches = re.findall(
+        r"\b[A-Z]{2,}-\d+\b",
+        user_request,
+        flags=re.IGNORECASE,
+    )
+
+    if not matches:
+        return None
+
+    # Use the last invoice number mentioned as the explicit target.
+    return matches[-1].upper()
 
 # AGENT
 
 def run_agent(user_request):
     state = {
         "discovered_invoices": set(),
-        "recorded_invoices": set()
+        "recorded_invoices": set(),
+        "explicit_invoice_number": extract_invoice_number(user_request),
     }
 
     if not user_request or not user_request.strip():
@@ -415,13 +458,35 @@ def run_agent(user_request):
             1. Never invent invoice data.
             2. Treat tool results as authoritative.
             3. Use tool results to decide the next action.
-            4. When recording an invoice, use an invoice number
-               returned by the search tool.
-            5. Verify a recorded invoice before claiming success.
-            6. Never claim success when a tool fails.
-            7. Give a concise summary with relevant evidence.
-            8. If the requested vendor has no invoice, report that
-               honestly.
+            4. If the user explicitly specifies an invoice number,
+               that invoice number is the target for recording and verification.
+            5. Never substitute a different invoice for an explicitly
+               requested invoice number.
+            6. Use find_latest_invoice only when the user asks to find
+               the latest invoice or does not specify a particular invoice.
+            7. Before recording an invoice, ensure its invoice number
+               matches the user's explicit target, if one was provided.
+            8. Always record an invoice before verifying it.
+            9. If record_invoice succeeds with already_existed=True,
+               treat the invoice as successfully recorded for this run.
+            10. After recording succeeds, call verify_invoice for the
+                exact same invoice number.
+            11. If verification is blocked because recording has not
+                happened yet, record the same invoice first, then retry
+                verification.
+            12. If verification fails, inspect the result and retry only
+                when a reasonable corrective action is available.
+            13. Never claim an invoice is verified unless the verification
+                tool explicitly returns verified=True.
+            14. Never claim success when a tool fails or verification
+                has not succeeded.
+            15. Do not repeat the same unsuccessful tool call indefinitely.
+                If you cannot recover, stop and explain the failure.
+            16. If the requested invoice or vendor has no matching record,
+                report that honestly.
+            17. When the task is complete, provide a concise summary
+                with the invoice number, relevant verified details,
+                and the verification outcome.
             """
         },
         {
