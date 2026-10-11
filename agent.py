@@ -13,26 +13,34 @@ def get_connection():
         port=5432
     )
 
+
 def save_execution_log(run_id, step, tool_name, arguments, status, result):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        INSERT INTO agent_execution_logs
-            (run_id, step, tool_name, arguments, status, result)
-        VALUES (%s, %s, %s, %s, %s, %s);
-    """, (
-        run_id,
-        step,
-        tool_name,
-        json.dumps(arguments),
-        status,
-        json.dumps(result)
-    ))
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO agent_execution_logs
+                    (run_id, step, tool_name, arguments, status, result)
+                VALUES (%s, %s, %s, %s, %s, %s);
+            """, (
+                run_id,
+                step,
+                tool_name,
+                json.dumps(arguments),
+                status,
+                json.dumps(result)
+            ))
 
-    connection.commit()
-    cursor.close()
-    connection.close()
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
 
 
 def start_agent_run(run_id, user_request):
@@ -64,97 +72,98 @@ def finish_agent_run(run_id, final_status, final_response):
         connection.close()
 
 
+
 def find_latest_invoice(vendor):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT id, invoice_number, vendor, amount, due_date
-        FROM invoices
-        WHERE LOWER(vendor) = LOWER(%s)
-        ORDER BY due_date DESC
-        LIMIT 1;
-    """, (vendor,))
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, invoice_number, vendor, amount, due_date
+                FROM invoices
+                WHERE LOWER(vendor) = LOWER(%s)
+                ORDER BY due_date DESC
+                LIMIT 1;
+            """, (vendor,))
 
-    result = cursor.fetchone()
+            result = cursor.fetchone()
 
-    cursor.close()
-    connection.close()
+        if result is None:
+            return {
+                "found": False,
+                "vendor": vendor
+            }
 
-    if result is None:
         return {
-            "found": False,
-            "vendor": vendor
+            "found": True,
+            "id": result[0],
+            "invoice_number": result[1],
+            "vendor": result[2],
+            "amount": float(result[3]),
+            "due_date": str(result[4])
         }
 
-    return {
-        "found": True,
-        "id": result[0],
-        "invoice_number": result[1],
-        "vendor": result[2],
-        "amount": float(result[3]),
-        "due_date": str(result[4])
-    }
+    finally:
+        connection.close()
+
 
 
 def record_invoice(invoice_number):
     """
-    Record an invoice using the authoritative invoice
-    stored in the source database.
-
-    The LLM only supplies the invoice number.
-    It cannot invent the amount, vendor or due date.
+    Record an invoice using the authoritative source database.
+    The LLM supplies only the invoice number.
     """
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    # First retrieve the real invoice.
-    cursor.execute("""
-        SELECT invoice_number, vendor, amount, due_date
-        FROM invoices
-        WHERE invoice_number = %s;
-    """, (invoice_number,))
+    try:
+        with connection.cursor() as cursor:
+            # Retrieve the authoritative invoice.
+            cursor.execute("""
+                SELECT invoice_number, vendor, amount, due_date
+                FROM invoices
+                WHERE invoice_number = %s;
+            """, (invoice_number,))
 
-    invoice = cursor.fetchone()
+            invoice = cursor.fetchone()
 
-    if invoice is None:
-        cursor.close()
-        connection.close()
+            if invoice is None:
+                return {
+                    "success": False,
+                    "error": "Invoice does not exist in the source system.",
+                    "invoice_number": invoice_number
+                }
+
+            # Insert it into the processed system.
+            cursor.execute("""
+                INSERT INTO processed_invoices
+                    (invoice_number, vendor, amount, due_date)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (invoice_number) DO NOTHING;
+            """, (
+                invoice[0],
+                invoice[1],
+                invoice[2],
+                invoice[3]
+            ))
+
+            inserted = cursor.rowcount == 1
+
+        connection.commit()
 
         return {
-            "success": False,
-            "error": "Invoice does not exist in the source system.",
-            "invoice_number": invoice_number
+            "success": True,
+            "invoice_number": invoice[0],
+            "inserted": inserted,
+            "already_existed": not inserted
         }
 
-    # Insert into internal finance system.
-    cursor.execute("""
-        INSERT INTO processed_invoices
-            (invoice_number, vendor, amount, due_date)
-        VALUES
-            (%s, %s, %s, %s)
-        ON CONFLICT (invoice_number) DO NOTHING;
-    """, (
-        invoice[0],
-        invoice[1],
-        invoice[2],
-        invoice[3]
-    ))
+    except Exception:
+        connection.rollback()
+        raise
 
-    inserted = cursor.rowcount == 1
-
-    connection.commit()
-
-    cursor.close()
-    connection.close()
-
-    return {
-        "success": True,
-        "invoice_number": invoice[0],
-        "inserted": inserted,
-        "already_existed": not inserted
-    }
+    finally:
+        connection.close()
 
 
 
@@ -366,17 +375,25 @@ def execute_tool(tool_name, arguments, state):
         return {"error": str(error)}
 
 # AGENT
+
 def run_agent(user_request):
     state = {
         "discovered_invoices": set(),
         "recorded_invoices": set()
     }
 
+    if not user_request or not user_request.strip():
+        print("Please enter a non-empty task.")
+        return "Empty task rejected."
+
     run_id = str(uuid.uuid4())
     print(f"\nRun ID: {run_id}")
 
-    start_agent_run(run_id, user_request)
-
+    try:
+        start_agent_run(run_id, user_request)
+    except Exception as error:
+        print(f"Could not start agent run: {error}")
+        return f"Agent could not start: {error}"
 
     execution_log = []
 
@@ -386,56 +403,252 @@ def run_agent(user_request):
             "content": """
             You are an autonomous finance operations worker.
 
-            Your job is to complete the user's requested task using the
-            available tools.
+            Your job is to complete the user's requested task using
+            the available tools.
 
             Rules:
-
-            1. Do not invent invoice data.
+            1. Never invent invoice data.
             2. Treat tool results as authoritative.
-            3. Use the output of one tool to decide the next action.
-            4. If the user asks you to record an invoice, use the invoice
-            number returned by the invoice search tool.
-            5. After recording an invoice, verify that the operation succeeded
-            before claiming success.
-            6. If a tool returns an error, do not pretend the task succeeded.
-            Try to recover when possible.
-            7. When the task is complete, give the user a concise summary
-            of what happened and include relevant evidence.
+            3. Use tool results to decide the next action.
+            4. When recording an invoice, use an invoice number
+               returned by the search tool.
+            5. Verify a recorded invoice before claiming success.
+            6. Never claim success when a tool fails.
+            7. Give a concise summary with relevant evidence.
+            8. If the requested vendor has no invoice, report that
+               honestly.
             """
         },
-
         {
             "role": "user",
             "content": user_request
         }
     ]
 
-    while True:
+    max_turns = 10
 
+    try:
+        for turn in range(max_turns):
 
-        max_attempts = 3
+            # Ask Ollama, retrying temporary failures.
+            max_attempts = 3
+            response = None
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = chat(
-                    model="qwen3:8b",
-                    messages=messages,
-                    tools=tools
-                )
-                break
-
-            except Exception as error:
-                print(
-                    f"Ollama call failed "
-                    f"(attempt {attempt}/{max_attempts}): {error}"
-                )
-
-                if attempt == max_attempts:
-                    final_response = (
-                        f"Agent execution failed after "
-                        f"{max_attempts} attempts: {error}"
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = chat(
+                        model="qwen3:8b",
+                        messages=messages,
+                        tools=tools
                     )
+                    break
+
+                except Exception as error:
+                    print(
+                        f"Ollama call failed "
+                        f"(attempt {attempt}/{max_attempts}): "
+                        f"{error}"
+                    )
+
+                    if attempt == max_attempts:
+                        final_response = (
+                            f"Agent execution failed after "
+                            f"{max_attempts} attempts: {error}"
+                        )
+
+                        finish_agent_run(
+                            run_id, "FAILED", final_response
+                        )
+                        print(final_response)
+                        print("Final task status: FAILED")
+                        return final_response
+
+            messages.append(response.message)
+
+            # No tool calls means the model has finished.
+            if not response.message.tool_calls:
+
+                verified_invoice = next(
+                    (
+                        entry["result"]
+                        for entry in reversed(execution_log)
+                        if entry["tool"] == "verify_invoice"
+                        and entry["result"].get("verified") is True
+                    ),
+                    None
+                )
+
+                # Determine whether the requested task succeeded.
+                search_results = [
+                    entry["result"]
+                    for entry in execution_log
+                    if entry["tool"] == "find_latest_invoice"
+                ]
+
+                record_results = [
+                    entry["result"]
+                    for entry in execution_log
+                    if entry["tool"] == "record_invoice"
+                ]
+
+                verification_results = [
+                    entry["result"]
+                    for entry in execution_log
+                    if entry["tool"] == "verify_invoice"
+                ]
+
+                has_failed_verification = any(
+                    result.get("verified") is False
+                    for result in verification_results
+                )
+
+                has_failed_recording = any(
+                    result.get("success") is False
+                    for result in record_results
+                )
+
+                has_failed_search = any(
+                    result.get("found") is False
+                    for result in search_results
+                )
+
+                if verified_invoice:
+                    final_response = (
+                        "Invoice verified successfully.\n\n"
+                        f"Invoice number: "
+                        f"{verified_invoice['invoice_number']}\n"
+                        f"Vendor: {verified_invoice['vendor']}\n"
+                        f"Amount: {verified_invoice['amount']} "
+                        "(currency not specified in the database)\n"
+                        f"Due date: {verified_invoice['due_date']}\n\n"
+                        "Verification: all checked fields match "
+                        "the source record."
+                    )
+                    final_status = "COMPLETED"
+
+                elif has_failed_verification:
+                    final_response = (
+                        "Invoice verification failed. "
+                        "The invoice could not be confirmed "
+                        "against the source record."
+                    )
+                    final_status = "FAILED"
+
+                elif has_failed_recording:
+                    final_response = (
+                        "Invoice recording failed. "
+                        "Check the execution log for details."
+                    )
+                    final_status = "FAILED"
+
+                elif has_failed_search:
+                    final_response = (
+                        "No matching invoice was found. "
+                        "No invoice was recorded."
+                    )
+                    final_status = "FAILED"
+
+                elif search_results and not record_results:
+                    requested_recording = "record" in user_request.lower()
+                    requested_verification = "verif" in user_request.lower()
+
+                    if requested_recording or requested_verification:
+                        final_response = (
+                            "The invoice was found, but the requested "
+                            "recording or verification was not completed."
+                        )
+                        final_status = "FAILED"
+                    else:
+                        final_response = (
+                            "Invoice search completed successfully.\n\n"
+                            + (
+                                response.message.content
+                                or "The search result is available "
+                                "in the execution log."
+                            )
+                        )
+                        final_status = "COMPLETED"
+
+                else:
+                    final_response = (
+                        response.message.content
+                        or "The agent finished without a final response."
+                    )
+                    final_status = "FAILED"
+
+                finish_agent_run(
+                    run_id, final_status, final_response
+                )
+
+                print("\n================ FINAL ANSWER ================\n")
+                print(final_response)
+                print("\nFinal task status:", final_status)
+
+                print("\n================ EXECUTION LOG ================\n")
+                print(json.dumps(execution_log, indent=2))
+
+                return final_response
+
+            # Execute each requested tool.
+            for tool_call in response.message.tool_calls:
+                tool_name = tool_call.function.name
+                arguments = tool_call.function.arguments
+
+                print("\n--------------------------------------------")
+                print("AI requested tool:", tool_name)
+                print("Arguments:", arguments)
+
+                result = execute_tool(
+                    tool_name, arguments, state
+                )
+
+                # Classify the tool result.
+                if result.get("verified") is False:
+                    status = "NOT_VERIFIED"
+                elif result.get("found") is False:
+                    status = "NOT_FOUND"
+                elif result.get("success") is False:
+                    status = (
+                        "BLOCKED_OR_ERROR"
+                        if result.get("error")
+                        else "FAILED"
+                    )
+                elif result.get("error"):
+                    status = "BLOCKED_OR_ERROR"
+                elif result.get("already_existed") is True:
+                    status = "ALREADY_EXISTS"
+                elif result.get("verified") is True:
+                    status = "VERIFIED"
+                else:
+                    status = "SUCCESS"
+
+                step = len(execution_log) + 1
+
+                execution_log.append({
+                    "step": step,
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "status": status,
+                    "result": result
+                })
+
+                # Persist the tool execution.
+                try:
+                    save_execution_log(
+                        run_id=run_id,
+                        step=step,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        status=status,
+                        result=result
+                    )
+
+                except Exception as error:
+                    final_response = (
+                        f"Execution logging failed at step "
+                        f"{step}: {error}"
+                    )
+
                     print(final_response)
 
                     try:
@@ -444,147 +657,57 @@ def run_agent(user_request):
                         )
                     except Exception as status_error:
                         print(
-                            f"Could not update run status: "
+                            "Could not update run status: "
                             f"{status_error}"
                         )
 
                     print("Final task status: FAILED")
                     return final_response
 
-        # Add the assistant's response to the conversation.
-        messages.append(response.message)
+                print("Tool result:", result)
+                print("Step status:", status)
 
-        # ----------------------------------------------------
-        # No tool call = agent is finished
-        # ----------------------------------------------------
+                messages.append({
+                    "role": "tool",
+                    "content": json.dumps(result),
+                    "tool_name": tool_name
+                })
 
-       
-        if not response.message.tool_calls:
-            
-            verified_invoice = next(
-                (
-                    entry["result"]
-                    for entry in reversed(execution_log)
-                    if entry["tool"] == "verify_invoice"
-                    and entry["result"].get("verified") is True
-                ),
-                None
+        # The agent exhausted its allowed turns.
+        final_response = (
+            f"Agent stopped after reaching the "
+            f"{max_turns}-turn limit."
+        )
+
+        finish_agent_run(
+            run_id, "FAILED", final_response
+        )
+
+        print(final_response)
+        print("Final task status: FAILED")
+        return final_response
+
+    except Exception as error:
+        # Catch unexpected errors not handled above.
+        final_response = (
+            f"Unexpected agent error: {type(error).__name__}: {error}"
+        )
+
+        print(final_response)
+
+        try:
+            finish_agent_run(
+                run_id, "FAILED", final_response
+            )
+        except Exception as status_error:
+            print(
+                "Could not update run status: "
+                f"{status_error}"
             )
 
-            if verified_invoice:
-                final_response = (
-                    "Invoice verified successfully.\n\n"
-                    f"Invoice number: {verified_invoice['invoice_number']}\n"
-                    f"Vendor: {verified_invoice['vendor']}\n"
-                    f"Amount: {verified_invoice['amount']} "
-                    "(currency not specified in the database)\n"
-                    f"Due date: {verified_invoice['due_date']}\n\n"
-                    "Verification: all checked fields match the source record."
-                )
-            else:
-                final_response = response.message.content
+        print("Final task status: FAILED")
+        return final_response
 
-
-            
-            verified_successfully = any(
-                entry["tool"] == "verify_invoice"
-                and entry["result"].get("verified") is True
-                for entry in execution_log
-            )
-
-            final_status = (
-                "COMPLETED"
-                if verified_successfully
-                else "FAILED"
-            )
-            finish_agent_run(   
-                run_id,
-                final_status,
-                final_response
-            )
-
-            print("\n================ FINAL ANSWER ================\n")
-            print(final_response)
-            print("\nFinal task status:", final_status)
-
-            print("\n================ EXECUTION LOG ================\n")
-            print(json.dumps(execution_log, indent=2))
-
-            return final_response
-
-
-        # ----------------------------------------------------
-        # Execute requested tools
-        # ----------------------------------------------------
-
-        for tool_call in response.message.tool_calls:
-
-            tool_name = tool_call.function.name
-            arguments = tool_call.function.arguments
-
-            print("\n--------------------------------------------")
-            print("AI requested tool:", tool_name)
-            print("Arguments:", arguments)
-
-            result = execute_tool(tool_name, arguments, state)
-            
-            # Classify the outcome of this tool call.
-            if result.get("verified") is False:
-                status = "NOT_VERIFIED"
-            elif result.get("error"):
-                status = "BLOCKED_OR_ERROR"
-            elif result.get("found") is False:
-                status = "NOT_FOUND"
-            elif result.get("success") is False:
-                status = "FAILED"
-            elif result.get("already_existed") is True:
-                status = "ALREADY_EXISTS"
-            elif result.get("verified") is True:
-                status = "VERIFIED"
-            else:
-                status = "SUCCESS"
-
-
-            # Store a record of the action.
-            execution_log.append({
-                "step": len(execution_log) + 1,
-                "tool": tool_name,
-                "arguments": arguments,
-                "status": status,
-                "result": result
-            })
-            try:
-                save_execution_log(
-                    run_id=run_id,
-                    step=len(execution_log),
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    status=status,
-                    result=result
-                )
-            except Exception as error:
-                final_response = (
-                    f"Execution logging failed at step {len(execution_log)}: {error}"
-                )
-                print(final_response)
-
-                try:
-                    finish_agent_run(run_id, "FAILED", final_response)
-                except Exception as status_error:
-                    print(f"Could not update run status: {status_error}")
-
-                print("Final task status: FAILED")
-                return final_response
-
-            print("Tool result:", result)
-            print("Step status:", status)
-
-            # Give the result back to the AI.
-            messages.append({
-                "role": "tool",
-                "content": json.dumps(result),
-                "tool_name": tool_name
-            })
 
 
 # MAIN
