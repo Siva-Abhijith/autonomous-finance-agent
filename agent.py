@@ -413,21 +413,59 @@ def run_agent(user_request):
 
     while True:
 
-        try:
-            response = chat(
-                model="qwen3:8b",
-                messages=messages,
-                tools=tools
-            )
-        except Exception as error:
-            final_response = f"Agent execution failed: {error}"
-            print(final_response)
+
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                finish_agent_run(run_id, "FAILED", final_response)
-            except Exception as status_error:
-                print(f"Could not update run status: {status_error}")
-            print("Final task status: FAILED")
-            return final_response
+                response = chat(
+                    model="qwen3:8b",
+                    messages=messages,
+                    tools=tools
+                )
+                break
+
+            except Exception as error:
+                print(
+                    f"Ollama call failed "
+                    f"(attempt {attempt}/{max_attempts}): {error}"
+                )
+
+                if attempt == max_attempts:
+                    final_response = (
+                        f"Agent execution failed after "
+                        f"{max_attempts} attempts: {error}"
+                    )
+                    print(final_response)
+
+                    try:
+                        finish_agent_run(
+                            run_id, "FAILED", final_response
+                        )
+                    except Exception as status_error:
+                        print(
+                            f"Could not update run status: "
+                            f"{status_error}"
+                        )
+
+                    print("Final task status: FAILED")
+                    return final_response
+
+        # try:
+        #     response = chat(
+        #         model="qwen3:8b",
+        #         messages=messages,
+        #         tools=tools
+        #     )
+        # except Exception as error:
+        #     final_response = f"Agent execution failed: {error}"
+        #     print(final_response)
+        #     try:
+        #         finish_agent_run(run_id, "FAILED", final_response)
+        #     except Exception as status_error:
+        #         print(f"Could not update run status: {status_error}")
+        #     print("Final task status: FAILED")
+        #     return final_response
 
         # Add the assistant's response to the conversation.
         messages.append(response.message)
