@@ -1,5 +1,4 @@
-cd "$HOME/Desktop/AI worker"
-nano README.md# Autonomous Finance Agent
+# Autonomous Finance Agent
 
 An AI-powered finance operations prototype built with Python, Ollama, and PostgreSQL. The agent interprets natural-language tasks, selects appropriate tools, performs controlled database operations, and verifies invoice records against authoritative source data.
 
