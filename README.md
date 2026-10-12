@@ -70,7 +70,18 @@ Start PostgreSQL:
 sudo systemctl start postgresql
 ```
 
-For a **fresh development database**, create the database and initialize its schema and sample data:
+#### Option A: Restore the included demo database
+
+To recreate the database with the included sample data and execution history:
+
+```bash
+sudo -u postgres createdb centralign
+sudo -u postgres psql -d centralign -f database/centralign_dump.sql
+```
+
+#### Option B: Create a fresh development database
+
+If you want a fresh database instead of the included snapshot:
 
 ```bash
 sudo -u postgres createdb centralign
@@ -78,9 +89,17 @@ sudo -u postgres psql -d centralign -f schema.sql
 sudo -u postgres psql -d centralign -f seed.sql
 ```
 
-Configure your local database credentials using `.env.example` as a reference. Create a `.env` file with the variables expected by the application and update the values for your environment.
+Use only one option. Both commands assume the `centralign` database does not already exist.
 
-**Important:** The commands above are for a fresh database only. If you already have a configured database with the required tables and data, do not recreate or reseed it.
+#### Configure environment variables
+
+Create your local environment file:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set the PostgreSQL credentials for your machine. Never commit `.env` or database passwords to GitHub.
 
 ### 4. Start Ollama
 
@@ -142,6 +161,7 @@ The live workflow has also been tested against PostgreSQL and Ollama. Invoice `A
 - Invoice verification checks the vendor, amount, and due date.
 - The prototype runs in a controlled development environment and is not intended for production financial use.
 - A successful tool result and verification are required to report successful invoice processing.
+- The current `find_latest_invoice` tool selects the invoice with the latest due date, because the source schema does not currently include an invoice issue date.
 
 ## Limitations
 
